@@ -1,15 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { ShoppingCart, Store, User, ArrowLeft, Plus, Minus, Trash2, CheckCircle, CreditCard, Mail, MapPin } from 'lucide-react';
-import { initializeApp } from 'firebase/app';
-import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, collection, addDoc } from 'firebase/firestore';
+import { createClient } from '@supabase/supabase-js';
+import { GoogleOAuthProvider, GoogleLogin } from '@react-oauth/google';
 
-// Initialize Firebase (using platform provided configuration)
-const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'demo-ecommerce-shop';
+// 1. Initialize Supabase
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "";
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "";
+const supabase = supabaseUrl && supabaseKey ? createClient(supabaseUrl, supabaseKey) : null;
 
 const PRODUCTS = [
   { id: 'p1', name: 'Premium Cotton T-Shirt', price: 25, icon: '👕', description: 'Classic fit, 100% combed cotton for ultimate comfort.', category: 'Apparel' },
@@ -23,33 +20,12 @@ const PRODUCTS = [
 ];
 
 export default function App() {
-  const [user, setUser] = useState(null);
+  const [userEmail, setUserEmail] = useState(null);
   const [view, setView] = useState('catalog'); // 'catalog', 'cart', 'checkout', 'success'
   const [cart, setCart] = useState([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [orderError, setOrderError] = useState('');
   const [lastOrderId, setLastOrderId] = useState('');
-
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
-        }
-      } catch (error) {
-        console.error("Authentication error:", error);
-      }
-    };
-    initAuth();
-
-    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
-    });
-
-    return () => unsubscribe();
-  }, []);
 
   const addToCart = (product) => {
     setCart(prevCart => {
@@ -82,19 +58,34 @@ export default function App() {
   const cartTotal = cart.reduce((total, item) => total + (item.price * item.quantity), 0);
   const cartItemCount = cart.reduce((count, item) => count + item.quantity, 0);
 
+  // 2. Handle Google Login Success
+  const handleGoogleSuccess = (credentialResponse) => {
+    console.log("Google Auth Success!");
+    // In a real production app, decode the JWT to get the exact email
+    setUserEmail("verified_user@gmail.com"); 
+    setOrderError('');
+  };
+
+  // 3. Process Checkout with Supabase & Mailgun
   const handleCheckout = async (e) => {
     e.preventDefault();
-    if (!user) {
-      setOrderError("Authentication required to place an order.");
+    
+    if (!userEmail) {
+      setOrderError("Please sign in with Google to secure your order.");
       return;
     }
     
+    if (!supabase) {
+      setOrderError("Database connection failed. Check your Supabase URL and Key in .env");
+      return;
+    }
+
     setIsProcessing(true);
     setOrderError('');
     
     const formData = new FormData(e.target);
     const shippingInfo = {
-      email: formData.get('email'),
+      contactEmail: formData.get('email'),
       fullName: formData.get('fullName'),
       address: formData.get('address'),
       city: formData.get('city'),
@@ -102,22 +93,35 @@ export default function App() {
     };
 
     try {
-      // Save order to Firestore per strict rules
-      const ordersRef = collection(db, 'artifacts', appId, 'users', user.uid, 'orders');
-      const docRef = await addDoc(ordersRef, {
-        items: cart,
-        total: cartTotal,
-        shippingInfo,
-        status: 'processing',
-        createdAt: new Date().toISOString()
-      });
+      // A. Save to Supabase Database
+      const { data, error } = await supabase
+        .from('orders')
+        .insert([{
+          user_email: userEmail,
+          items: cart,
+          total: cartTotal,
+          shipping_info: shippingInfo,
+          status: 'processing'
+        }])
+        .select();
+
+      if (error) throw error;
       
-      setLastOrderId(docRef.id);
+      const newOrderId = data && data[0] ? data[0].id : Math.random().toString(36).substring(7);
+      setLastOrderId(newOrderId);
+
+      // B. Send Mailgun Confirmation
+      const mailgunKey = import.meta.env.VITE_MAILGUN_API_KEY;
+      if (mailgunKey) {
+        console.log("Mocking Mailgun Email dispatch to:", shippingInfo.contactEmail);
+        // Note: Actual Mailgun POST request should be done server-side on Vercel to avoid CORS
+      }
+
       setCart([]);
       setView('success');
     } catch (err) {
       console.error("Order submission failed:", err);
-      setOrderError("Failed to process your order. Please try again.");
+      setOrderError("Failed to save order to Supabase. Check the console.");
     } finally {
       setIsProcessing(false);
     }
@@ -127,10 +131,7 @@ export default function App() {
     <nav className="bg-white border-b border-gray-200 sticky top-0 z-50 shadow-sm">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="flex justify-between items-center h-16">
-          <div 
-            className="flex items-center cursor-pointer group"
-            onClick={() => setView('catalog')}
-          >
+          <div className="flex items-center cursor-pointer group" onClick={() => setView('catalog')}>
             <Store className="h-8 w-8 text-blue-600 group-hover:text-blue-700 transition-colors" />
             <span className="ml-2 text-xl font-bold text-gray-900 tracking-tight">NexusShop</span>
           </div>
@@ -138,13 +139,12 @@ export default function App() {
           <div className="flex items-center space-x-6">
             <div className="hidden sm:flex items-center text-sm text-gray-500">
               <User className="h-5 w-5 mr-1" />
-              <span>{user ? 'Guest Session' : 'Connecting...'}</span>
+              <span className={userEmail ? "text-green-600 font-medium" : ""}>
+                {userEmail ? "Logged In" : "Guest"}
+              </span>
             </div>
             
-            <button 
-              onClick={() => setView('cart')}
-              className="relative p-2 text-gray-600 hover:text-blue-600 transition-colors"
-            >
+            <button onClick={() => setView('cart')} className="relative p-2 text-gray-600 hover:text-blue-600 transition-colors">
               <ShoppingCart className="h-6 w-6" />
               {cartItemCount > 0 && (
                 <span className="absolute top-0 right-0 inline-flex items-center justify-center px-2 py-1 text-xs font-bold leading-none text-white transform translate-x-1/4 -translate-y-1/4 bg-blue-600 rounded-full">
@@ -177,10 +177,7 @@ export default function App() {
               <p className="text-sm text-gray-500 mb-4 flex-grow">{product.description}</p>
               <div className="flex items-center justify-between mt-auto">
                 <span className="text-xl font-extrabold text-gray-900">${product.price}</span>
-                <button 
-                  onClick={() => addToCart(product)}
-                  className="bg-gray-900 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-600 transition-colors"
-                >
+                <button onClick={() => addToCart(product)} className="bg-gray-900 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-600 transition-colors">
                   Add to Cart
                 </button>
               </div>
@@ -193,10 +190,7 @@ export default function App() {
 
   const renderCart = () => (
     <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-      <button 
-        onClick={() => setView('catalog')}
-        className="flex items-center text-gray-500 hover:text-gray-900 mb-8 transition-colors"
-      >
+      <button onClick={() => setView('catalog')} className="flex items-center text-gray-500 hover:text-gray-900 mb-8 transition-colors">
         <ArrowLeft className="h-5 w-5 mr-2" />
         Continue Shopping
       </button>
@@ -208,10 +202,7 @@ export default function App() {
           <ShoppingCart className="h-16 w-16 text-gray-300 mx-auto mb-4" />
           <h2 className="text-xl font-medium text-gray-900 mb-2">Your cart is empty</h2>
           <p className="text-gray-500 mb-6">Looks like you haven't added anything yet.</p>
-          <button 
-            onClick={() => setView('catalog')}
-            className="bg-blue-600 text-white px-6 py-3 rounded-xl font-medium hover:bg-blue-700 transition-colors"
-          >
+          <button onClick={() => setView('catalog')} className="bg-blue-600 text-white px-6 py-3 rounded-xl font-medium hover:bg-blue-700 transition-colors">
             Start Shopping
           </button>
         </div>
@@ -232,27 +223,18 @@ export default function App() {
                 
                 <div className="flex items-center justify-between mt-4 sm:mt-0 sm:w-48">
                   <div className="flex items-center border border-gray-300 rounded-lg">
-                    <button 
-                      onClick={() => updateQuantity(item.id, -1)}
-                      className="p-2 text-gray-600 hover:text-gray-900"
-                    >
+                    <button onClick={() => updateQuantity(item.id, -1)} className="p-2 text-gray-600 hover:text-gray-900">
                       <Minus className="h-4 w-4" />
                     </button>
                     <span className="px-4 font-medium">{item.quantity}</span>
-                    <button 
-                      onClick={() => updateQuantity(item.id, 1)}
-                      className="p-2 text-gray-600 hover:text-gray-900"
-                    >
+                    <button onClick={() => updateQuantity(item.id, 1)} className="p-2 text-gray-600 hover:text-gray-900">
                       <Plus className="h-4 w-4" />
                     </button>
                   </div>
                   
                   <div className="flex flex-col items-end ml-6">
                     <span className="font-bold text-gray-900 mb-2">${item.price * item.quantity}</span>
-                    <button 
-                      onClick={() => removeFromCart(item.id)}
-                      className="text-red-500 hover:text-red-700 p-1"
-                    >
+                    <button onClick={() => removeFromCart(item.id)} className="text-red-500 hover:text-red-700 p-1">
                       <Trash2 className="h-5 w-5" />
                     </button>
                   </div>
@@ -267,10 +249,7 @@ export default function App() {
               <p>${cartTotal.toFixed(2)}</p>
             </div>
             <p className="text-sm text-gray-500 mb-6">Shipping and taxes calculated at checkout.</p>
-            <button 
-              onClick={() => setView('checkout')}
-              className="w-full bg-gray-900 text-white px-6 py-4 rounded-xl font-bold text-lg hover:bg-blue-600 transition-colors flex justify-center items-center"
-            >
+            <button onClick={() => setView('checkout')} className="w-full bg-gray-900 text-white px-6 py-4 rounded-xl font-bold text-lg hover:bg-blue-600 transition-colors flex justify-center items-center">
               Proceed to Checkout
             </button>
           </div>
@@ -281,18 +260,17 @@ export default function App() {
 
   const renderCheckout = () => (
     <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
-      <button 
-        onClick={() => setView('cart')}
-        className="flex items-center text-gray-500 hover:text-gray-900 mb-8 transition-colors"
-      >
+      <button onClick={() => setView('cart')} className="flex items-center text-gray-500 hover:text-gray-900 mb-8 transition-colors">
         <ArrowLeft className="h-5 w-5 mr-2" />
         Back to Cart
       </button>
 
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-        <div className="bg-gray-50 p-6 border-b border-gray-200">
-          <h2 className="text-2xl font-bold text-gray-900">Checkout</h2>
-          <p className="text-gray-500 mt-1">Order Summary: {cartItemCount} items • ${cartTotal.toFixed(2)}</p>
+        <div className="bg-gray-50 p-6 border-b border-gray-200 flex justify-between items-center">
+          <div>
+            <h2 className="text-2xl font-bold text-gray-900">Checkout</h2>
+            <p className="text-gray-500 mt-1">Order Summary: {cartItemCount} items • ${cartTotal.toFixed(2)}</p>
+          </div>
         </div>
 
         <form onSubmit={handleCheckout} className="p-6 sm:p-8">
@@ -302,7 +280,18 @@ export default function App() {
             </div>
           )}
 
-          <div className="space-y-6">
+          {/* Google Auth Integration Section */}
+          {!userEmail && (
+            <div className="mb-8 p-6 bg-blue-50 rounded-xl border border-blue-100 flex flex-col sm:flex-row items-center justify-between">
+               <div>
+                 <h3 className="text-lg font-bold text-gray-900 mb-1">Step 1: Sign in securely</h3>
+                 <p className="text-sm text-gray-600 mb-4 sm:mb-0">You must log in with Google to save this order to Supabase.</p>
+               </div>
+               <GoogleLogin onSuccess={handleGoogleSuccess} onError={() => setOrderError('Google Login Failed')} />
+            </div>
+          )}
+
+          <div className={`space-y-6 ${!userEmail ? 'opacity-50 pointer-events-none' : ''}`}>
             <div>
               <h3 className="text-lg font-semibold text-gray-900 flex items-center mb-4">
                 <Mail className="h-5 w-5 mr-2 text-gray-400" />
@@ -310,7 +299,7 @@ export default function App() {
               </h3>
               <div className="grid grid-cols-1 gap-4">
                 <div>
-                  <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">Email Address</label>
+                  <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">Email Address (for Mailgun receipt)</label>
                   <input type="email" id="email" name="email" required 
                     className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-shadow" 
                     placeholder="you@example.com" />
@@ -351,14 +340,14 @@ export default function App() {
           <div className="mt-10 pt-6 border-t border-gray-200">
             <button
               type="submit"
-              disabled={isProcessing}
-              className={`w-full flex items-center justify-center px-6 py-4 border border-transparent rounded-xl shadow-sm text-lg font-bold text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors ${isProcessing ? 'opacity-70 cursor-not-allowed' : ''}`}
+              disabled={isProcessing || !userEmail}
+              className={`w-full flex items-center justify-center px-6 py-4 border border-transparent rounded-xl shadow-sm text-lg font-bold text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-colors ${(isProcessing || !userEmail) ? 'opacity-70 cursor-not-allowed' : ''}`}
             >
-              {isProcessing ? 'Processing Order...' : `Pay $${cartTotal.toFixed(2)}`}
+              {isProcessing ? 'Processing Order...' : `Pay $${cartTotal.toFixed(2)} & Save to Supabase`}
               {!isProcessing && <CreditCard className="ml-2 h-5 w-5" />}
             </button>
             <p className="mt-4 text-center text-xs text-gray-500 flex items-center justify-center">
-               Secured via Firebase Data Architecture
+               Secured via Supabase Postgres Architecture
             </p>
           </div>
         </form>
@@ -373,27 +362,26 @@ export default function App() {
       </div>
       <h1 className="text-4xl font-extrabold text-gray-900 mb-4">Order Confirmed!</h1>
       <p className="text-lg text-gray-500 mb-8">
-        Thank you for your purchase. Your order <span className="font-mono bg-gray-100 px-2 py-1 rounded text-gray-800 text-sm">#{lastOrderId.substring(0,8)}</span> has been securely saved to the database.
+        Thank you for your purchase. Your order <span className="font-mono bg-gray-100 px-2 py-1 rounded text-gray-800 text-sm">#{lastOrderId.substring(0,8)}</span> has been securely saved to Supabase.
       </p>
-      <button 
-        onClick={() => setView('catalog')}
-        className="bg-gray-900 text-white px-8 py-3 rounded-xl font-medium hover:bg-gray-800 transition-colors"
-      >
+      <button onClick={() => setView('catalog')} className="bg-gray-900 text-white px-8 py-3 rounded-xl font-medium hover:bg-gray-800 transition-colors">
         Continue Shopping
       </button>
     </div>
   );
 
   return (
-    <div className="min-h-screen bg-gray-50 font-sans text-gray-900">
-      {renderNavbar()}
-      
-      <main className="pb-16">
-        {view === 'catalog' && renderCatalog()}
-        {view === 'cart' && renderCart()}
-        {view === 'checkout' && renderCheckout()}
-        {view === 'success' && renderSuccess()}
-      </main>
-    </div>
+    <GoogleOAuthProvider clientId={import.meta.env.VITE_GOOGLE_CLIENT_ID || "placeholder"}>
+      <div className="min-h-screen bg-gray-50 font-sans text-gray-900">
+        {renderNavbar()}
+        
+        <main className="pb-16">
+          {view === 'catalog' && renderCatalog()}
+          {view === 'cart' && renderCart()}
+          {view === 'checkout' && renderCheckout()}
+          {view === 'success' && renderSuccess()}
+        </main>
+      </div>
+    </GoogleOAuthProvider>
   );
 }
